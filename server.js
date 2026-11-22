@@ -66,9 +66,9 @@ function getChat(id) {
 }
 
 // ---------- Helpers ----------
-async function askAI(messages) {
+async function callGemini(model, messages) {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -89,6 +89,26 @@ async function askAI(messages) {
   const data = await res.json();
   const parts = data.candidates?.[0]?.content?.parts || [];
   return parts.filter((p) => p.text && !p.thought).map((p) => p.text).join("\n");
+}
+
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || "gemini-3.5-flash-lite";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Retries when Gemini is busy (503/429/500/504), then switches to a backup model
+async function askAI(messages) {
+  const attempts = [MODEL, MODEL, FALLBACK_MODEL, FALLBACK_MODEL];
+  let lastErr;
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      return await callGemini(attempts[i], messages);
+    } catch (e) {
+      lastErr = e;
+      console.warn(`⚠️  Gemini attempt ${i + 1} failed (${attempts[i]}): ${e.message.slice(0, 120)}`);
+      if (!/Gemini API (429|500|503|504)/.test(e.message)) throw e;
+      await sleep(1500 * (i + 1));
+    }
+  }
+  throw lastErr;
 }
 
 async function sendInstagram(recipientId, text) {
@@ -141,7 +161,17 @@ async function handleMessage(senderId, text) {
   chat.messages = chat.messages.slice(-20);
   if (chat.messages[0].role !== "user") chat.messages.shift();
 
-  const raw = await askAI(chat.messages);
+  let raw;
+  try {
+    raw = await askAI(chat.messages);
+  } catch (e) {
+    console.error("❌ AI unavailable:", e.message.slice(0, 200));
+    if (!chat.fallbackSent) {
+      chat.fallbackSent = true;
+      await sendInstagram(senderId, "Thanks for your message! 🙌 Shakeeb will get back to you shortly.");
+    }
+    return;
+  }
 
   const leadMatch = raw.match(/^LEAD:.*$/m);
   const stopped = /\[STOP\]/.test(raw);
