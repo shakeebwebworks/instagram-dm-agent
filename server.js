@@ -3,7 +3,8 @@ import crypto from "crypto";
 
 const {
   VERIFY_TOKEN,
-  APP_SECRET,
+  APP_SECRET: RAW_APP_SECRET,
+  APP_SECRET_2: RAW_APP_SECRET_2,
   IG_ACCESS_TOKEN,
   GEMINI_API_KEY,
   MODEL = "gemini-3.5-flash-lite",
@@ -14,6 +15,12 @@ const {
   TELEGRAM_CHAT_ID,
   PORT = 3000,
 } = process.env;
+
+const clean = (v) => (v || "").trim().replace(/^["']|["']$/g, "").trim();
+const APP_SECRET = clean(RAW_APP_SECRET);
+const APP_SECRET_2 = clean(RAW_APP_SECRET_2);
+console.log(`🔐 APP_SECRET length: ${APP_SECRET.length} (a real Meta app secret is 32 characters)`);
+if (APP_SECRET_2) console.log(`🔐 APP_SECRET_2 length: ${APP_SECRET_2.length}`);
 
 for (const [k, v] of Object.entries({ VERIFY_TOKEN, APP_SECRET, IG_ACCESS_TOKEN, GEMINI_API_KEY })) {
   if (!v) console.warn(`⚠️  Missing env var: ${k}`);
@@ -113,11 +120,13 @@ async function notifyShakeeb(text) {
 function validSignature(req) {
   const header = req.get("x-hub-signature-256");
   if (!header || !req.rawBody) return false;
-  const expected =
-    "sha256=" + crypto.createHmac("sha256", APP_SECRET).update(req.rawBody).digest("hex");
   const a = Buffer.from(header);
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  return [APP_SECRET, APP_SECRET_2].filter(Boolean).some((secret) => {
+    const expected =
+      "sha256=" + crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex");
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  });
 }
 
 // ---------- Core logic ----------
@@ -171,7 +180,7 @@ app.get("/webhook", (req, res) => {
 app.post("/webhook", (req, res) => {
   console.log("📩 Webhook hit from Meta");
   if (!validSignature(req)) {
-    console.error("❌ Signature check failed: APP_SECRET is probably wrong (use the newest App Secret)");
+    console.error(`❌ Signature check failed (header present: ${!!req.get("x-hub-signature-256")}, secret length: ${APP_SECRET.length}). Try the other secret in APP_SECRET_2.`);
     return res.sendStatus(401);
   }
   res.sendStatus(200); // reply fast, process after
